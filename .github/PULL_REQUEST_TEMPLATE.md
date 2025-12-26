@@ -1,30 +1,21 @@
-## Melange Pull Request Template
+## Description
 
-<!--
-*** PULL REQUEST CHECKLIST: PLEASE START HERE ***
+<!-- Describe your changes -->
 
-The single most important feature of melange is that we can build Wolfi.
+## Type of Change
 
-Many changes to melange introduce a risk of breaking the build, and sometimes
-these are not flushed out until a package is changed (much) later.  This
-pertains to basic execution, SCA changes, linter changes, and more.
--->
+- [ ] Bug fix
+- [ ] New feature
+- [ ] Documentation update
+- [ ] Other (please describe)
 
-### Functional Changes
+## Testing
 
-- [ ] This change can build all of Wolfi without errors (describe results in notes)
+<!-- How did you test your changes? -->
 
-Notes:
+- [ ] Unit tests pass (`go test ./...`)
+- [ ] Tested with real package build (if applicable)
 
-### SCA Changes
+## Notes
 
-- [ ] Examining several representative APKs show no regression / the desired effect (details in notes)
-
-Notes:
-
-### Linter
-
-- [ ] The new check is clean across Wolfi
-- [ ] The new check is opt-in or a warning
-
-Notes:
+<!-- Any additional context or notes -->

@@ -1,22 +1,22 @@
-# Melange Development Environment
+# melange2 Development Environment
 
-To ease the development of melange, we offer a script that builds
+To ease the development of melange2, we offer a script that builds
 a [Wolfi](https://github.com/wolfi-dev/community)-based image with
-the required tooling to compile and run melange. When running the
+the required tooling to compile and run melange2. When running the
 devenv, you'll drop into a Wolfi shell, with your local fork directory
 will mounted in `$PWD`.
 
 ## Launching the DevEnv
 
 To launch the development environment, simply run the script from
-the top of the melange environment:
+the top of the melange2 environment:
 
 ```bash
-# Clone the melange repo
+# Clone the melange2 repo
 
-git clone git@github.com:chainguard-dev/melange.git
+git clone git@github.com:dlorenc/melange2.git
 
-cd melange
+cd melange2
 
 # Build and launch the devenv:
 
@@ -28,7 +28,7 @@ cd melange
 |_| |_| |_|\___|_|\__,_|_| |_|\__, |\___|
                               |___/      
 
-Welcome to the melange development environment!
+Welcome to the melange2 development environment!
 
 To run melange from your local fork run:
         go run ./main.go

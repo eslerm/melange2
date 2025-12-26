@@ -1,197 +1,143 @@
-# melange
+# melange2
 
-Build apk packages using declarative pipelines.
+> **EXPERIMENTAL** - This is an experimental fork of [melange](https://github.com/chainguard-dev/melange) that uses [BuildKit](https://github.com/moby/buildkit) as the execution backend.
 
-Commonly used to provide custom packages for container images built with [apko][apko]. The majority
-of apks are built for use with either the [Wolfi](https://github.com/wolfi-dev) or [Alpine Linux](https://www.alpinelinux.org/) ecosystems.
+Build apk packages using declarative pipelines, powered by BuildKit.
 
-Key features:
+## What is melange2?
 
- - **Pipeline-oriented builds.** Every step of the build pipeline is defined and
-   controlled by you, unlike traditional package managers which have distinct
-   phases.
- - **Multi-architecture by default.** QEMU is used to emulate various
-   architectures, avoiding the need for cross-compilation steps.
+melange2 is an experimental reimplementation of melange's build execution layer using BuildKit instead of the traditional runner-based approach (bubblewrap, Docker, QEMU). This provides:
 
-## Why
+- **BuildKit-native execution** - Leverages BuildKit's LLB (Low-Level Build) for efficient, cacheable builds
+- **Better caching** - BuildKit's content-addressable cache provides fine-grained layer caching
+- **Progress visibility** - Real-time build progress with step timing and cache hit information
+- **Simplified architecture** - Single execution backend instead of multiple runners
 
-Secure software factories are the evolution of DevOps, allowing a
-user to prove the provenance of all artifacts incorporated
-into a software appliance.  By building and capturing software
-artifacts into packages, DevOps teams can manage their software
-artifacts as if they were any other component of an image.
+## Key Differences from melange
 
-This is especially useful when building software appliances in
-the form of OCI container images with [apko][apko].
+| Feature | melange | melange2 |
+|---------|---------|----------|
+| Execution backend | bubblewrap/Docker/QEMU | BuildKit |
+| Multi-arch support | QEMU emulation | BuildKit cross-compilation |
+| Build caching | Limited | BuildKit content-addressable cache |
+| Progress output | Basic logging | Step-by-step with cache status |
 
-   [apko]: https://github.com/chainguard-dev/apko
+## Status
+
+This project is **experimental** and not intended for production use. It exists to explore BuildKit as an alternative execution backend for melange builds.
+
+Current limitations:
+- The `test` command still uses the legacy runner system
+- Some edge cases may not be fully supported
+- API and behavior may change without notice
 
 ## Installation
 
-You can install Melange from Homebrew:
-
 ```shell
-brew install melange
+go install github.com/dlorenc/melange2@latest
 ```
 
-You can also install Melange from source:
+## Prerequisites
+
+melange2 requires a running BuildKit daemon:
 
 ```shell
-go install chainguard.dev/melange@latest
+# Start BuildKit with Docker
+docker run -d --name buildkitd --privileged -p 1234:1234 \
+  moby/buildkit:latest --addr tcp://0.0.0.0:1234
+
+# Or use a local buildkitd
+buildkitd --addr tcp://0.0.0.0:1234
 ```
 
-You can also use the Melange container image:
+## Usage
 
 ```shell
-docker run cgr.dev/chainguard/melange version
+# Build a package
+melange2 build package.yaml --buildkit-addr tcp://localhost:1234
+
+# Build with debug output (shows build logs)
+melange2 build package.yaml --buildkit-addr tcp://localhost:1234 --debug
+
+# Build for a specific architecture
+melange2 build package.yaml --buildkit-addr tcp://localhost:1234 --arch x86_64
 ```
 
-To use the examples, you'll generally want to mount your current directory into the container and provide elevated privileges, e.g.:
+### Example Output
 
-```shell
-docker run --privileged -v "$PWD":/work cgr.dev/chainguard/melange build examples/gnu-hello.yaml
+```
+INFO solving build graph
+INFO [1/12] local://apko-mypackage
+INFO   -> local://apko-mypackage (0.0s) [done]
+INFO [3/12] copy apko rootfs
+INFO   -> copy apko rootfs (0.0s) [CACHED]
+INFO [7/12] uses: go/build
+INFO     | go build -o /home/build/output ./cmd/...
+INFO   -> uses: go/build (18.3s) [done]
+INFO
+INFO Build summary:
+INFO   Total steps:  12
+INFO   Cached:       5
+INFO   Executed:     7
+INFO   Duration:     45.2s
 ```
 
-Running outside of a container requires [Docker](https://docs.docker.com/get-docker/), but should also work with other runtimes such as [podman](https://podman.io/getting-started/installation).
+## Build File Format
 
-## Quickstart
-
-A melange build file looks like:
+melange2 uses the same build file format as melange:
 
 ```yaml
 package:
   name: hello
-  version: 2.12
+  version: 1.0.0
   epoch: 0
-  description: "the GNU hello world program"
-  copyright:
-    - attestation: |
-        Copyright 1992, 1995, 1996, 1997, 1998, 1999, 2000, 2001, 2002, 2005,
-        2006, 2007, 2008, 2010, 2011, 2013, 2014, 2022 Free Software Foundation,
-        Inc.
-      license: GPL-3.0-or-later
-  dependencies:
-    runtime:
+  description: "Hello world package"
 
 environment:
   contents:
     repositories:
-      - https://dl-cdn.alpinelinux.org/alpine/edge/main
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
     packages:
-      - alpine-baselayout-data
       - busybox
       - build-base
-      - scanelf
-      - ssl_client
-      - ca-certificates-bundle
 
 pipeline:
-  - uses: fetch
-    with:
-      uri: https://ftp.gnu.org/gnu/hello/hello-${{package.version}}.tar.gz
-      expected-sha256: cf04af86dc085268c5f4470fbae49b18afbc221b78096aab842d934a76bad0ab
-  - uses: autoconf/configure
-  - uses: autoconf/make
-  - uses: autoconf/make-install
-  - uses: strip
-
-subpackages:
-  - name: "hello-doc"
-    description: "Documentation for hello"
-    dependencies:
-      runtime:
-        - foo
-    pipeline:
-      - uses: split/manpages
-    test:
-      pipeline:
-        - uses: test/docs
-
-test:
-  environment:
-    contents:
-      packages:
-        - bar
-  pipeline:
-    - runs: |
-        hello
-        hello --version
+  - runs: |
+      echo "Hello from BuildKit!"
+      mkdir -p ${{targets.destdir}}/usr/bin
+      echo '#!/bin/sh' > ${{targets.destdir}}/usr/bin/hello
+      echo 'echo Hello World' >> ${{targets.destdir}}/usr/bin/hello
+      chmod +x ${{targets.destdir}}/usr/bin/hello
 ```
 
-We can build this with:
+## Architecture
 
-```shell
-melange build examples/gnu-hello.yaml
+melange2 converts melange pipelines to BuildKit LLB operations:
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  melange.yaml   │────▶│   LLB Builder   │────▶│    BuildKit     │
+│  (pipelines)    │     │  (pkg/buildkit) │     │    Daemon       │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+                                                        │
+                        ┌─────────────────┐            │
+                        │   APK Output    │◀───────────┘
+                        │  (packages/)    │
+                        └─────────────────┘
 ```
 
-or, with Docker:
+The build process:
+1. **apko** creates the build environment as an OCI layer
+2. **LLB Builder** converts pipeline steps to BuildKit operations
+3. **BuildKit** executes the build with caching and exports results
+4. **melange** packages the output as APK files
 
-```shell
-docker run --privileged --rm -v "${PWD}":/work \
-  cgr.dev/chainguard/melange build examples/gnu-hello.yaml
-```
+## Upstream
 
-This will create a `packages` folder, with an entry for each architecture supported by the package. If you only want to build for the current architecture, you can add `--arch $(uname -m)` to the build command. Inside the architecture directory you should find apk files for each package built in the pipeline.
+This is a fork of [chainguard-dev/melange](https://github.com/chainguard-dev/melange). For production use, please use the upstream project.
 
-If you want to sign your apks, create a signing key with the `melange keygen` command:
+## License
 
-```shell
-melange keygen
-```
-```
- generating keypair with a 4096 bit prime, please wait...
- wrote private key to melange.rsa
- wrote public key to melange.rsa.pub
-```
-
-And then pass the `--signing-key` argument to `melange build`.
-
-## Debugging melange Builds
-
-To include debug-level information on melange builds, edit your `melange.yaml` file and include `set -x` in your pipeline. You can add this flag at any point of your pipeline commands to further debug a specific section of your build.
-
-```yaml
-...
-pipeline:
-  - name: Build Minicli application
-    runs: |
-      set -x
-      APP_HOME="${{targets.destdir}}/usr/share/hello-minicli"
-...
-```
-
-## Default Substitutions
-
-Melange provides the following default substitutions which can be referenced in the build file pipeline:
-
-| **Substitution**            | **Description**                                                          |
-|-----------------------------|--------------------------------------------------------------------------|
-| `${{package.name}}`         | Package name                                                             |
-| `${{package.version}}`      | Package version                                                          |
-| `${{package.epoch}}`        | Package epoch                                                            |
-| `${{package.full-version}}` | `${{package.version}}-r${{package.epoch}}`                               |
-| `${{package.description}}`  | Package description                                                      |
-| `${{package.srcdir}}`       | Package source directory (`--source-dir`)                                |
-| `${{subpkg.name}}`          | Subpackage name                                                          |
-| `${{context.name}}`         | main package or subpackage name
-| `${{targets.outdir}}`       | Directory where targets will be stored                                   |
-| `${{targets.contextdir}}`   | Directory where targets will be stored for main packages and subpackages |
-| `${{targets.destdir}}`      | Directory where targets will be stored for main                          |
-| `${{targets.subpkgdir}}`    | Directory where targets will be stored for subpackages                   |
-| `${{build.arch}}`           | Architecture of current build (e.g. x86_64, aarch64)                     |
-| `${{build.goarch}}`         | GOARCH of current build (e.g. amd64, arm64)                              |
-
-An example build file pipeline with substitutions:
-
-```yaml
-pipeline:
-  - name: 'Create tmp dir'
-    runs: mkdir ${{targets.destdir}}/var/lib/${{package.name}}/tmp
-```
-
-[More detailed documentation](./docs/)
-
-## Usage with apko
-
-To use a melange built apk in apko, either upload it to a package repository or use a "local" repository. Using a local repository allows a melange build and apko build to run in the same directory (or GitHub repo) without using external storage.
-An example of this approach can be seen in the [nginx-image-demo repo](https://github.com/chainguard-dev/nginx-image-demo/).
+Apache License 2.0 - see [LICENSE](LICENSE) for details.
