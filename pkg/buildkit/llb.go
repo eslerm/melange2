@@ -1,0 +1,198 @@
+// Copyright 2024 Chainguard, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package buildkit
+
+import (
+	"fmt"
+	"path/filepath"
+
+	"github.com/moby/buildkit/client/llb"
+
+	"chainguard.dev/melange/pkg/cond"
+	"chainguard.dev/melange/pkg/config"
+)
+
+const (
+	// DefaultWorkDir is the default working directory for pipeline steps.
+	DefaultWorkDir = "/home/build"
+
+	// DefaultPath is the default PATH for pipeline execution.
+	DefaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+)
+
+// PipelineBuilder converts melange pipelines to BuildKit LLB.
+type PipelineBuilder struct {
+	// Debug enables shell debugging (set -x)
+	Debug bool
+
+	// BaseEnv is the base environment for all pipeline steps.
+	// Pipeline-specific environment variables override these.
+	BaseEnv map[string]string
+}
+
+// NewPipelineBuilder creates a new PipelineBuilder with default configuration.
+func NewPipelineBuilder() *PipelineBuilder {
+	return &PipelineBuilder{
+		BaseEnv: map[string]string{
+			"PATH": DefaultPath,
+		},
+	}
+}
+
+// BuildPipelines builds LLB for multiple pipelines in sequence.
+// Each pipeline operates on the state returned by the previous one.
+func (b *PipelineBuilder) BuildPipelines(base llb.State, pipelines []config.Pipeline) (llb.State, error) {
+	state := base
+	for i := range pipelines {
+		var err error
+		state, err = b.BuildPipeline(state, &pipelines[i])
+		if err != nil {
+			return llb.State{}, fmt.Errorf("pipeline %d: %w", i, err)
+		}
+	}
+	return state, nil
+}
+
+// BuildPipeline converts a single pipeline to LLB operations.
+// Returns the modified state after running the pipeline.
+func (b *PipelineBuilder) BuildPipeline(base llb.State, p *config.Pipeline) (llb.State, error) {
+	// Check if this pipeline should run
+	if p.If != "" {
+		shouldRun, err := cond.Evaluate(p.If)
+		if err != nil {
+			return llb.State{}, fmt.Errorf("evaluating if condition %q: %w", p.If, err)
+		}
+		if !shouldRun {
+			return base, nil
+		}
+	}
+
+	state := base
+
+	// Only run if there's something to run
+	if p.Runs != "" {
+		// Determine working directory
+		workdir := DefaultWorkDir
+		if p.WorkDir != "" {
+			if filepath.IsAbs(p.WorkDir) {
+				workdir = p.WorkDir
+			} else {
+				workdir = filepath.Join(DefaultWorkDir, p.WorkDir)
+			}
+		}
+
+		// Build the script
+		script := b.buildScript(p.Runs, workdir)
+
+		// Build environment
+		env := MergeEnv(b.BaseEnv, p.Environment)
+
+		// Build run options
+		opts := []llb.RunOption{
+			llb.Args([]string{"/bin/sh", "-c", script}),
+			llb.Dir(workdir),
+		}
+
+		// Add sorted environment variables for determinism
+		opts = append(opts, SortedEnvOpts(env)...)
+
+		// Add custom name for better logging
+		if name := pipelineName(p); name != "" {
+			opts = append(opts, llb.WithCustomName(name))
+		}
+
+		state = state.Run(opts...).Root()
+	}
+
+	// Process nested pipelines
+	if len(p.Pipeline) > 0 {
+		// Create a child builder with merged environment
+		childBuilder := &PipelineBuilder{
+			Debug:   b.Debug,
+			BaseEnv: MergeEnv(b.BaseEnv, p.Environment),
+		}
+
+		for i := range p.Pipeline {
+			var err error
+			state, err = childBuilder.BuildPipeline(state, &p.Pipeline[i])
+			if err != nil {
+				return llb.State{}, fmt.Errorf("nested pipeline %d: %w", i, err)
+			}
+		}
+	}
+
+	return state, nil
+}
+
+// buildScript creates the shell script to run for a pipeline step.
+func (b *PipelineBuilder) buildScript(runs, workdir string) string {
+	debugOpt := ' '
+	if b.Debug {
+		debugOpt = 'x'
+	}
+
+	return fmt.Sprintf(`set -e%c
+[ -d '%s' ] || mkdir -p '%s'
+cd '%s'
+%s
+exit 0`, debugOpt, workdir, workdir, workdir, runs)
+}
+
+// pipelineName returns a human-readable name for the pipeline.
+func pipelineName(p *config.Pipeline) string {
+	if p.Name != "" {
+		return p.Name
+	}
+	if p.Uses != "" {
+		return fmt.Sprintf("uses: %s", p.Uses)
+	}
+	if p.Label != "" {
+		return p.Label
+	}
+	return ""
+}
+
+// PrepareWorkspace creates the initial workspace structure.
+// Returns a state with /home/build and melange-out directories created.
+func PrepareWorkspace(base llb.State, pkgName string) llb.State {
+	return base.File(
+		llb.Mkdir("/home/build", 0755, llb.WithParents(true)),
+		llb.WithCustomName("create workspace"),
+	).File(
+		llb.Mkdir(fmt.Sprintf("/home/build/melange-out/%s", pkgName), 0755, llb.WithParents(true)),
+		llb.WithCustomName("create output directory"),
+	)
+}
+
+// CopySourceToWorkspace copies source files from a Local mount to the workspace.
+func CopySourceToWorkspace(base llb.State, localName string) llb.State {
+	return base.File(
+		llb.Copy(llb.Local(localName), "/", "/home/build/", &llb.CopyInfo{
+			CopyDirContentsOnly: true,
+		}),
+		llb.WithCustomName("copy source to workspace"),
+	)
+}
+
+// ExportWorkspace creates a state suitable for exporting the workspace output.
+// This extracts /home/build/melange-out to the root for export.
+func ExportWorkspace(state llb.State) llb.State {
+	return llb.Scratch().File(
+		llb.Copy(state, "/home/build/melange-out", "/", &llb.CopyInfo{
+			CopyDirContentsOnly: true,
+		}),
+		llb.WithCustomName("export workspace"),
+	)
+}
