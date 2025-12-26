@@ -442,3 +442,14 @@ func WithSBOMGenerator(generator sbom.Generator) Option {
 		return nil
 	}
 }
+
+// WithBuildKitAddr sets the BuildKit daemon address to use for builds.
+// When set, builds will use BuildKit instead of the container runner.
+// The address should be in the form "tcp://host:port" or "unix:///path/to/socket".
+// If empty, the traditional runner-based build is used.
+func WithBuildKitAddr(addr string) Option {
+	return func(b *Build) error {
+		b.BuildKitAddr = addr
+		return nil
+	}
+}

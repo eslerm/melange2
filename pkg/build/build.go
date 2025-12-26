@@ -128,6 +128,7 @@ type Build struct {
 	EnvFile               string
 	VarsFile              string
 	Runner                container.Runner
+	BuildKitAddr          string // BuildKit daemon address (when set, uses BuildKit instead of Runner)
 	containerConfig       *container.Config
 	Debug                 bool
 	DebugRunner           bool
@@ -205,6 +206,13 @@ func New(ctx context.Context, opts ...Option) (*Build, error) {
 			return nil, fmt.Errorf("unable to create workspace dir: %w", err)
 		}
 		b.WorkspaceDir = tmpdir
+	} else if b.BuildKitAddr != "" {
+		// BuildKit mode: create a temporary workspace directory
+		tmpdir, err := os.MkdirTemp("", "melange-workspace-*")
+		if err != nil {
+			return nil, fmt.Errorf("unable to create workspace dir: %w", err)
+		}
+		b.WorkspaceDir = tmpdir
 	}
 
 	// If no config file is explicitly requested for the build context
@@ -266,8 +274,8 @@ func New(ctx context.Context, opts ...Option) (*Build, error) {
 		b.SourceDateEpoch = t
 	}
 
-	// Check that we actually can run things in containers.
-	if b.Runner != nil && !b.Runner.TestUsability(ctx) {
+	// Check that we actually can run things in containers (unless using BuildKit).
+	if b.BuildKitAddr == "" && b.Runner != nil && !b.Runner.TestUsability(ctx) {
 		return nil, fmt.Errorf("unable to run containers using %s, specify --runner and one of %s", b.Runner.Name(), GetAllRunners())
 	}
 
@@ -576,6 +584,11 @@ func (b *Build) BuildPackage(ctx context.Context) error {
 	log := clog.FromContext(ctx)
 	ctx, span := otel.Tracer("melange").Start(ctx, "BuildPackage")
 	defer span.End()
+
+	// Dispatch to BuildKit if configured
+	if b.BuildKitAddr != "" {
+		return b.buildPackageBuildKit(ctx)
+	}
 
 	if b.Runner == nil {
 		return fmt.Errorf("no runner was specified")
