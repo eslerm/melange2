@@ -120,11 +120,11 @@ func (b *Build) buildPackageBuildKit(ctx context.Context) error {
 		}
 	}
 
-	// Build the guest environment with apko and get the layer
+	// Build the guest environment with apko and get the layer(s)
 	log.Info("building guest environment with apko")
-	layer, releaseData, layerCleanup, err := b.buildGuestLayer(ctx)
+	layers, releaseData, layerCleanup, err := b.buildGuestLayers(ctx)
 	if err != nil {
-		return fmt.Errorf("building guest layer: %w", err)
+		return fmt.Errorf("building guest layers: %w", err)
 	}
 	defer layerCleanup()
 
@@ -160,7 +160,7 @@ func (b *Build) buildPackageBuildKit(ctx context.Context) error {
 	}
 
 	log.Info("running build with BuildKit")
-	if err := builder.Build(ctx, layer, cfg); err != nil {
+	if err := builder.BuildWithLayers(ctx, layers, cfg); err != nil {
 		return fmt.Errorf("buildkit build failed: %w", err)
 	}
 
@@ -301,8 +301,33 @@ func (b *Build) buildPackageBuildKit(ctx context.Context) error {
 // buildGuestLayer builds the apko image and returns the layer for BuildKit.
 // The returned cleanup function should be called after the layer has been loaded.
 func (b *Build) buildGuestLayer(ctx context.Context) (v1.Layer, *apko_build.ReleaseData, func(), error) {
+	layers, releaseData, cleanup, err := b.buildGuestLayers(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(layers) == 0 {
+		cleanup()
+		return nil, nil, nil, errors.New("no layers returned from buildGuestLayers")
+	}
+	// Return only the first layer for backward compatibility
+	// If multi-layer mode is enabled, use buildGuestLayers directly
+	return layers[0], releaseData, cleanup, nil
+}
+
+// buildGuestLayers builds the apko image and returns layers for BuildKit.
+// The number of layers is controlled by MaxLayers:
+// - MaxLayers == 1: single layer (original behavior)
+// - MaxLayers > 1: multiple layers for better cache efficiency
+//
+// When using multiple layers, they are ordered from base to top:
+// - Base OS layers (glibc, busybox) - change rarely
+// - Compiler layers (gcc, binutils) - change occasionally
+// - Package-specific dependencies - change frequently
+//
+// The returned cleanup function should be called after the layers have been loaded.
+func (b *Build) buildGuestLayers(ctx context.Context) ([]v1.Layer, *apko_build.ReleaseData, func(), error) {
 	log := clog.FromContext(ctx)
-	ctx, span := otel.Tracer("melange").Start(ctx, "buildGuestLayer")
+	ctx, span := otel.Tracer("melange").Start(ctx, "buildGuestLayers")
 	defer span.End()
 
 	tmp, err := os.MkdirTemp(os.TempDir(), "apko-temp-*")
@@ -313,6 +338,20 @@ func (b *Build) buildGuestLayer(ctx context.Context) (v1.Layer, *apko_build.Rele
 
 	imgConfig := b.Configuration.Environment
 	imgConfig.Archs = []apko_types.Architecture{b.Arch}
+
+	// Set the layer budget based on MaxLayers configuration
+	// Default to 50 if not set
+	maxLayers := b.MaxLayers
+	if maxLayers == 0 {
+		maxLayers = 50
+	}
+	// Use "origin" strategy which partitions packages by their origin
+	// This groups related packages together for better cache efficiency
+	imgConfig.Layering = &apko_types.Layering{
+		Strategy: "origin",
+		Budget:   maxLayers,
+	}
+	log.Infof("using layer budget of %d with origin strategy", maxLayers)
 
 	opts := []apko_build.Option{
 		apko_build.WithImageConfiguration(imgConfig),
@@ -341,6 +380,8 @@ func (b *Build) buildGuestLayer(ctx context.Context) (v1.Layer, *apko_build.Rele
 		return nil, nil, nil, errors.New("missing locked config")
 	}
 
+	// Preserve the layering configuration in the locked config
+	locked.Layering = imgConfig.Layering
 	b.Configuration.Environment = *locked
 	opts = append(opts, apko_build.WithImageConfiguration(*locked))
 
@@ -362,20 +403,14 @@ func (b *Build) buildGuestLayer(ctx context.Context) (v1.Layer, *apko_build.Rele
 	bc.Summarize(ctx)
 	log.Infof("auth configured for: %v", maps.Keys(b.Auth))
 
-	// Build the image
-	if err := bc.BuildImage(ctx); err != nil {
-		cleanup()
-		return nil, nil, nil, fmt.Errorf("unable to generate image: %w", err)
-	}
-
-	// Get the layer
-	// Note: The cleanup function should be called by the caller after the layer
-	// has been loaded into BuildKit (via ImageLoader.LoadLayer).
-	_, layer, err := bc.ImageLayoutToLayer(ctx)
+	// Use BuildLayers which internally calls buildImage and handles layering
+	// We don't call BuildImage separately as BuildLayers does it internally
+	layers, err := bc.BuildLayers(ctx)
 	if err != nil {
 		cleanup()
-		return nil, nil, nil, err
+		return nil, nil, nil, fmt.Errorf("building layers: %w", err)
 	}
+	log.Infof("apko generated %d layer(s)", len(layers))
 
 	// Get release data
 	releaseData := &apko_build.ReleaseData{
@@ -386,5 +421,5 @@ func (b *Build) buildGuestLayer(ctx context.Context) (v1.Layer, *apko_build.Rele
 	// Note: In BuildKit mode, we can't easily extract release data from the container
 	// This is a limitation that can be addressed in a future update
 
-	return layer, releaseData, cleanup, nil
+	return layers, releaseData, cleanup, nil
 }

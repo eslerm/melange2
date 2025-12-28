@@ -392,3 +392,25 @@ func WithBuildKitAddr(addr string) Option {
 		return nil
 	}
 }
+
+// WithMaxLayers sets the maximum number of layers for the build environment.
+// When set to 1, a single layer is used (original behavior).
+// When set to a higher value (default 50), apko's multi-layer mode is used
+// for better BuildKit cache efficiency.
+//
+// Multi-layer mode provides several benefits:
+// - Better cache hits: changes to package-specific deps don't invalidate compiler layer
+// - Faster rebuilds: only changed layers need to be rebuilt/transferred
+// - Smaller transfers: BuildKit can skip unchanged layers when exporting
+// - Parallel builds: multiple builds sharing base layers benefit from shared cache
+//
+// This option only has effect when BuildKit is enabled via WithBuildKitAddr.
+func WithMaxLayers(count int) Option {
+	return func(b *Build) error {
+		if count < 1 {
+			count = 1
+		}
+		b.MaxLayers = count
+		return nil
+	}
+}
