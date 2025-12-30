@@ -213,43 +213,49 @@ func (s *GCSStorage) doUpload(ctx context.Context, objectPath, contentType strin
 	return nil
 }
 
-// WriteLog writes a build log to GCS.
+// WriteLog writes a build log to GCS with retry logic.
 func (s *GCSStorage) WriteLog(ctx context.Context, jobID, pkgName string, r io.Reader) (string, error) {
 	objectPath := fmt.Sprintf("builds/%s/logs/%s.log", jobID, pkgName)
-	wc := s.client.Bucket(s.bucket).Object(objectPath).NewWriter(ctx)
-	wc.ContentType = "text/plain"
 
-	if _, err := io.Copy(wc, r); err != nil {
-		wc.Close()
-		return "", fmt.Errorf("writing log to GCS: %w", err)
+	// Read the content into memory so we can retry if needed
+	content, err := io.ReadAll(r)
+	if err != nil {
+		return "", fmt.Errorf("reading log content: %w", err)
 	}
 
-	if err := wc.Close(); err != nil {
-		return "", fmt.Errorf("closing GCS writer: %w", err)
+	err = s.uploadWithRetry(ctx, objectPath, "text/plain", func() (io.Reader, error) {
+		return io.NopCloser(strings.NewReader(string(content))), nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("writing log to GCS: %w", err)
 	}
 
 	return fmt.Sprintf("gs://%s/%s", s.bucket, objectPath), nil
 }
 
-// WriteArtifact writes a build artifact to GCS.
+// WriteArtifact writes a build artifact to GCS with retry logic.
 func (s *GCSStorage) WriteArtifact(ctx context.Context, jobID, name string, r io.Reader) (string, error) {
 	objectPath := fmt.Sprintf("builds/%s/artifacts/%s", jobID, name)
-	wc := s.client.Bucket(s.bucket).Object(objectPath).NewWriter(ctx)
 
-	// Set content type based on extension
+	// Determine content type based on extension
+	var contentType string
 	if strings.HasSuffix(name, ".apk") {
-		wc.ContentType = "application/vnd.apk"
+		contentType = "application/vnd.apk"
 	} else if strings.HasSuffix(name, ".tar.gz") {
-		wc.ContentType = "application/gzip"
+		contentType = "application/gzip"
 	}
 
-	if _, err := io.Copy(wc, r); err != nil {
-		wc.Close()
+	// Read the content into memory so we can retry if needed
+	content, err := io.ReadAll(r)
+	if err != nil {
+		return "", fmt.Errorf("reading artifact content: %w", err)
+	}
+
+	err = s.uploadWithRetry(ctx, objectPath, contentType, func() (io.Reader, error) {
+		return io.NopCloser(strings.NewReader(string(content))), nil
+	})
+	if err != nil {
 		return "", fmt.Errorf("writing artifact to GCS: %w", err)
-	}
-
-	if err := wc.Close(); err != nil {
-		return "", fmt.Errorf("closing GCS writer: %w", err)
 	}
 
 	return fmt.Sprintf("gs://%s/%s", s.bucket, objectPath), nil
