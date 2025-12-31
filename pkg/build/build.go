@@ -217,29 +217,7 @@ func NewFromConfig(ctx context.Context, cfg *BuildConfig) (*Build, error) {
 	return b.initialize(ctx)
 }
 
-// New creates a new Build from a set of Options.
-// Deprecated: Use NewFromConfig with a BuildConfig for new code.
-func New(ctx context.Context, opts ...Option) (*Build, error) {
-	b := Build{
-		WorkspaceIgnore: ".melangeignore",
-		SourceDir:       "", // Empty by default - use --source-dir to specify
-		OutDir:          ".",
-		CacheDir:        "./melange-cache/",
-		Arch:            apko_types.ParseArchitecture(runtime.GOARCH),
-		Start:           time.Now(),
-		SBOMGenerator:   &spdx.Generator{},
-	}
-
-	for _, opt := range opts {
-		if err := opt(&b); err != nil {
-			return nil, err
-		}
-	}
-
-	return b.initialize(ctx)
-}
-
-// initialize performs common initialization for both New and NewFromConfig.
+// initialize performs common initialization for NewFromConfig.
 func (b *Build) initialize(ctx context.Context) (*Build, error) {
 
 	log := clog.FromContext(ctx).With("arch", b.Arch.ToAPK())

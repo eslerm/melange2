@@ -36,49 +36,113 @@ import (
 	"github.com/dlorenc/melange2/pkg/util"
 )
 
-// TestBuildKit holds configuration for running tests with BuildKit.
-type TestBuildKit struct {
+// TestConfig contains all configuration for running tests.
+// This is the single source of truth for test parameters.
+type TestConfig struct {
+	// ConfigFile is the path to the test configuration file.
+	ConfigFile string
+
 	// Package to test (optional, defaults to main package name).
-	Package       string
-	Configuration config.Configuration
-	ConfigFile    string
-	WorkspaceDir  string
-	// Ordered directories where to find 'uses' pipelines.
-	PipelineDirs      []string
-	SourceDir         string
-	Arch              apko_types.Architecture
-	ExtraKeys         []string
-	ExtraRepos        []string
-	ExtraTestPackages []string
-	CacheDir    string
+	Package string
+
+	// Arch is the target architecture for the test.
+	Arch apko_types.Architecture
+
+	// WorkspaceDir is the directory for the test workspace.
+	WorkspaceDir string
+
+	// PipelineDirs are directories where to find 'uses' pipelines.
+	PipelineDirs []string
+
+	// SourceDir is the directory containing source files.
+	SourceDir string
+
+	// CacheDir is the directory for cached inputs.
+	CacheDir string
+
+	// ApkCacheDir is the directory for cached apk packages.
 	ApkCacheDir string
-	EnvFile     string
-	Debug             bool
-	Auth              map[string]options.Auth
-	IgnoreSignatures  bool
-	BuildKitAddr      string
+
+	// ExtraKeys are additional keys for the test environment keyring.
+	ExtraKeys []string
+
+	// ExtraRepos are additional repositories for the test environment.
+	ExtraRepos []string
+
+	// ExtraTestPackages are extra packages to install for testing.
+	ExtraTestPackages []string
+
+	// EnvFile is the file for preloaded environment variables.
+	EnvFile string
+
+	// Debug enables debug logging of test pipelines.
+	Debug bool
+
+	// Auth contains authentication for package repositories.
+	Auth map[string]options.Auth
+
+	// IgnoreSignatures indicates whether to ignore repository signature verification.
+	IgnoreSignatures bool
+
+	// BuildKitAddr is the BuildKit daemon address.
+	BuildKitAddr string
 }
 
-// TestBuildKitOption is a functional option for TestBuildKit.
-type TestBuildKitOption func(*TestBuildKit) error
-
-// NewTestBuildKit creates a new TestBuildKit with the provided options.
-func NewTestBuildKit(ctx context.Context, opts ...TestBuildKitOption) (*TestBuildKit, error) {
-	t := &TestBuildKit{
+// NewTestConfig creates a new TestConfig with sensible defaults.
+func NewTestConfig() *TestConfig {
+	return &TestConfig{
 		Arch:         apko_types.Architecture("amd64"),
 		BuildKitAddr: buildkit.DefaultAddr,
 	}
+}
 
-	for _, opt := range opts {
-		if err := opt(t); err != nil {
-			return nil, err
+// Clone returns a deep copy of the TestConfig.
+func (c *TestConfig) Clone() *TestConfig {
+	clone := *c
+	if c.PipelineDirs != nil {
+		clone.PipelineDirs = make([]string, len(c.PipelineDirs))
+		copy(clone.PipelineDirs, c.PipelineDirs)
+	}
+	if c.ExtraKeys != nil {
+		clone.ExtraKeys = make([]string, len(c.ExtraKeys))
+		copy(clone.ExtraKeys, c.ExtraKeys)
+	}
+	if c.ExtraRepos != nil {
+		clone.ExtraRepos = make([]string, len(c.ExtraRepos))
+		copy(clone.ExtraRepos, c.ExtraRepos)
+	}
+	if c.ExtraTestPackages != nil {
+		clone.ExtraTestPackages = make([]string, len(c.ExtraTestPackages))
+		copy(clone.ExtraTestPackages, c.ExtraTestPackages)
+	}
+	if c.Auth != nil {
+		clone.Auth = make(map[string]options.Auth)
+		for k, v := range c.Auth {
+			clone.Auth[k] = v
 		}
+	}
+	return &clone
+}
+
+// TestBuildKit holds runtime state for running tests with BuildKit.
+type TestBuildKit struct {
+	// Config contains the test configuration.
+	Config *TestConfig
+
+	// Configuration is the parsed melange configuration.
+	Configuration config.Configuration
+}
+
+// NewTestBuildKitFromConfig creates a new TestBuildKit from a TestConfig.
+func NewTestBuildKitFromConfig(ctx context.Context, cfg *TestConfig) (*TestBuildKit, error) {
+	t := &TestBuildKit{
+		Config: cfg,
 	}
 
 	// Parse configuration if ConfigFile is set
-	if t.ConfigFile != "" {
-		parsedCfg, err := config.ParseConfiguration(ctx, t.ConfigFile,
-			config.WithEnvFileForParsing(t.EnvFile),
+	if cfg.ConfigFile != "" {
+		parsedCfg, err := config.ParseConfiguration(ctx, cfg.ConfigFile,
+			config.WithEnvFileForParsing(cfg.EnvFile),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load configuration: %w", err)
@@ -108,28 +172,28 @@ func (t *TestBuildKit) TestPackage(ctx context.Context) error {
 	ctx, span := otel.Tracer("melange").Start(ctx, "testPackageBuildKit")
 	defer span.End()
 
-	log.Infof("melange %s with BuildKit at %s is testing:", version.GetVersionInfo().GitVersion, t.BuildKitAddr)
-	log.Debugf("  configuration file: %s", t.ConfigFile)
+	log.Infof("melange %s with BuildKit at %s is testing:", version.GetVersionInfo().GitVersion, t.Config.BuildKitAddr)
+	log.Debugf("  configuration file: %s", t.Config.ConfigFile)
 
 	pkg := &t.Configuration.Package
 
 	// Check architecture
 	inarchs := len(pkg.TargetArchitecture) == 0
 	for _, ta := range pkg.TargetArchitecture {
-		if apko_types.ParseArchitecture(ta) == t.Arch {
+		if apko_types.ParseArchitecture(ta) == t.Config.Arch {
 			inarchs = true
 			break
 		}
 	}
 	if !inarchs {
-		log.Warnf("skipping test for %s on %s", pkg.Name, t.Arch)
+		log.Warnf("skipping test for %s on %s", pkg.Name, t.Config.Arch)
 		return nil
 	}
 
 	// Compile the configuration to resolve 'uses' pipelines
 	log.Debugf("evaluating pipelines for test requirements")
 	if err := t.Compile(ctx); err != nil {
-		return fmt.Errorf("compiling %s tests: %w", t.ConfigFile, err)
+		return fmt.Errorf("compiling %s tests: %w", t.Config.ConfigFile, err)
 	}
 
 	// Filter out any subpackages with false If conditions
@@ -151,13 +215,13 @@ func (t *TestBuildKit) TestPackage(ctx context.Context) error {
 	}
 
 	// Create BuildKit builder
-	builder, err := buildkit.NewBuilder(t.BuildKitAddr)
+	builder, err := buildkit.NewBuilder(t.Config.BuildKitAddr)
 	if err != nil {
 		return fmt.Errorf("creating buildkit builder: %w", err)
 	}
 	defer builder.Close()
 
-	if t.Debug {
+	if t.Config.Debug {
 		builder.WithShowLogs(true)
 	}
 
@@ -195,7 +259,7 @@ func (t *TestBuildKit) TestPackage(ctx context.Context) error {
 	}
 
 	// Create workspace directory
-	workspaceDir := t.WorkspaceDir
+	workspaceDir := t.Config.WorkspaceDir
 	if workspaceDir == "" {
 		workspaceDir, err = os.MkdirTemp("", "melange-test-*")
 		if err != nil {
@@ -207,14 +271,14 @@ func (t *TestBuildKit) TestPackage(ctx context.Context) error {
 	// Configure and run tests
 	testCfg := &buildkit.TestConfig{
 		PackageName:     pkg.Name,
-		Arch:            t.Arch,
+		Arch:            t.Config.Arch,
 		TestPipelines:   testPipelines,
 		SubpackageTests: subpackageTests,
 		BaseEnv:         baseEnv,
-		SourceDir:       t.SourceDir,
+		SourceDir:       t.Config.SourceDir,
 		WorkspaceDir:    workspaceDir,
-		CacheDir:        t.CacheDir,
-		Debug:           t.Debug,
+		CacheDir:        t.Config.CacheDir,
+		Debug:           t.Config.Debug,
 	}
 
 	log.Info("running tests with BuildKit")
@@ -231,18 +295,18 @@ func (t *TestBuildKit) Compile(ctx context.Context) error {
 	cfg := t.Configuration
 	flavor := "gnu"
 
-	sm, err := NewSubstitutionMap(&cfg, t.Arch, flavor, nil)
+	sm, err := NewSubstitutionMap(&cfg, t.Config.Arch, flavor, nil)
 	if err != nil {
 		return err
 	}
 
 	ignore := &Compiled{
-		PipelineDirs: t.PipelineDirs,
+		PipelineDirs: t.Config.PipelineDirs,
 	}
 
 	// Compile build pipelines (to evaluate but not accumulate deps)
 	if err := ignore.CompilePipelines(ctx, sm, cfg.Pipeline); err != nil {
-		return fmt.Errorf("compiling package %q pipelines: %w", t.Package, err)
+		return fmt.Errorf("compiling package %q pipelines: %w", t.Config.Package, err)
 	}
 
 	for i, sp := range cfg.Subpackages {
@@ -264,7 +328,7 @@ func (t *TestBuildKit) Compile(ctx context.Context) error {
 		}
 
 		test := &Compiled{
-			PipelineDirs: t.PipelineDirs,
+			PipelineDirs: t.Config.PipelineDirs,
 		}
 
 		te := &cfg.Subpackages[i].Test.Environment.Contents
@@ -285,20 +349,20 @@ func (t *TestBuildKit) Compile(ctx context.Context) error {
 
 	if cfg.Test != nil {
 		test := &Compiled{
-			PipelineDirs: t.PipelineDirs,
+			PipelineDirs: t.Config.PipelineDirs,
 		}
 
 		te := &t.Configuration.Test.Environment.Contents
 
 		// Append the main test package to be installed
-		if t.Package != "" {
-			te.Packages = append(te.Packages, t.Package)
+		if t.Config.Package != "" {
+			te.Packages = append(te.Packages, t.Config.Package)
 		} else {
 			te.Packages = append(te.Packages, t.Configuration.Package.Name)
 		}
 
 		if err := test.CompilePipelines(ctx, sm, cfg.Test.Pipeline); err != nil {
-			return fmt.Errorf("compiling %q test pipelines: %w", t.Package, err)
+			return fmt.Errorf("compiling %q test pipelines: %w", t.Config.Package, err)
 		}
 
 		// Append anything the main package test needs
@@ -328,17 +392,17 @@ func (t *TestBuildKit) buildTestLayer(ctx context.Context) (v1.Layer, func(), er
 	if t.Configuration.Test != nil {
 		imgConfig = t.Configuration.Test.Environment
 	}
-	imgConfig.Archs = []apko_types.Architecture{t.Arch}
+	imgConfig.Archs = []apko_types.Architecture{t.Config.Arch}
 
 	opts := []apko_build.Option{
 		apko_build.WithImageConfiguration(imgConfig),
-		apko_build.WithArch(t.Arch),
-		apko_build.WithExtraKeys(t.ExtraKeys),
-		apko_build.WithExtraBuildRepos(t.ExtraRepos),
-		apko_build.WithExtraPackages(t.ExtraTestPackages),
-		apko_build.WithCache(t.ApkCacheDir, false, apk.NewCache(true)),
+		apko_build.WithArch(t.Config.Arch),
+		apko_build.WithExtraKeys(t.Config.ExtraKeys),
+		apko_build.WithExtraBuildRepos(t.Config.ExtraRepos),
+		apko_build.WithExtraPackages(t.Config.ExtraTestPackages),
+		apko_build.WithCache(t.Config.ApkCacheDir, false, apk.NewCache(true)),
 		apko_build.WithTempDir(tmp),
-		apko_build.WithIgnoreSignatures(t.IgnoreSignatures),
+		apko_build.WithIgnoreSignatures(t.Config.IgnoreSignatures),
 	}
 
 	guestFS := tarfs.New()
@@ -365,111 +429,4 @@ func (t *TestBuildKit) buildTestLayer(ctx context.Context) (v1.Layer, func(), er
 
 	log.Debug("successfully built test environment with apko")
 	return layer, cleanup, nil
-}
-
-// Option functions for TestBuildKit
-
-func WithTestBuildKitConfig(configFile string) TestBuildKitOption {
-	return func(t *TestBuildKit) error {
-		t.ConfigFile = configFile
-		return nil
-	}
-}
-
-func WithTestBuildKitPackage(pkg string) TestBuildKitOption {
-	return func(t *TestBuildKit) error {
-		t.Package = pkg
-		return nil
-	}
-}
-
-func WithTestBuildKitArch(arch apko_types.Architecture) TestBuildKitOption {
-	return func(t *TestBuildKit) error {
-		t.Arch = arch
-		return nil
-	}
-}
-
-func WithTestBuildKitAddr(addr string) TestBuildKitOption {
-	return func(t *TestBuildKit) error {
-		t.BuildKitAddr = addr
-		return nil
-	}
-}
-
-func WithTestBuildKitSourceDir(dir string) TestBuildKitOption {
-	return func(t *TestBuildKit) error {
-		t.SourceDir = dir
-		return nil
-	}
-}
-
-func WithTestBuildKitWorkspaceDir(dir string) TestBuildKitOption {
-	return func(t *TestBuildKit) error {
-		t.WorkspaceDir = dir
-		return nil
-	}
-}
-
-func WithTestBuildKitCacheDir(dir string) TestBuildKitOption {
-	return func(t *TestBuildKit) error {
-		t.CacheDir = dir
-		return nil
-	}
-}
-
-func WithTestBuildKitApkCacheDir(dir string) TestBuildKitOption {
-	return func(t *TestBuildKit) error {
-		t.ApkCacheDir = dir
-		return nil
-	}
-}
-
-func WithTestBuildKitExtraKeys(keys []string) TestBuildKitOption {
-	return func(t *TestBuildKit) error {
-		t.ExtraKeys = keys
-		return nil
-	}
-}
-
-func WithTestBuildKitExtraRepos(repos []string) TestBuildKitOption {
-	return func(t *TestBuildKit) error {
-		t.ExtraRepos = repos
-		return nil
-	}
-}
-
-func WithTestBuildKitExtraTestPackages(pkgs []string) TestBuildKitOption {
-	return func(t *TestBuildKit) error {
-		t.ExtraTestPackages = pkgs
-		return nil
-	}
-}
-
-func WithTestBuildKitPipelineDir(dir string) TestBuildKitOption {
-	return func(t *TestBuildKit) error {
-		t.PipelineDirs = append(t.PipelineDirs, dir)
-		return nil
-	}
-}
-
-func WithTestBuildKitEnvFile(file string) TestBuildKitOption {
-	return func(t *TestBuildKit) error {
-		t.EnvFile = file
-		return nil
-	}
-}
-
-func WithTestBuildKitDebug(debug bool) TestBuildKitOption {
-	return func(t *TestBuildKit) error {
-		t.Debug = debug
-		return nil
-	}
-}
-
-func WithTestBuildKitIgnoreSignatures(ignore bool) TestBuildKitOption {
-	return func(t *TestBuildKit) error {
-		t.IgnoreSignatures = ignore
-		return nil
-	}
 }
