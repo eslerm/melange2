@@ -77,38 +77,37 @@ func ParseTestFlags(args []string) (*TestFlags, []string, error) {
 	return flags, fs.Args(), nil
 }
 
-// TestOptions converts TestFlags into a slice of build.TestBuildKitOption
-func (flags *TestFlags) TestOptions(ctx context.Context, args ...string) ([]build.TestBuildKitOption, error) {
-	options := []build.TestBuildKitOption{
-		build.WithTestBuildKitWorkspaceDir(flags.WorkspaceDir),
-		build.WithTestBuildKitCacheDir(flags.CacheDir),
-		build.WithTestBuildKitApkCacheDir(flags.ApkCacheDir),
-		build.WithTestBuildKitExtraKeys(flags.ExtraKeys),
-		build.WithTestBuildKitExtraRepos(flags.ExtraRepos),
-		build.WithTestBuildKitExtraTestPackages(flags.ExtraTestPackages),
-		build.WithTestBuildKitEnvFile(flags.EnvFile),
-		build.WithTestBuildKitDebug(flags.Debug),
-		build.WithTestBuildKitIgnoreSignatures(flags.IgnoreSignatures),
-		build.WithTestBuildKitAddr(flags.BuildKitAddr),
-	}
+// ToTestConfig converts TestFlags into a TestConfig struct.
+func (flags *TestFlags) ToTestConfig(ctx context.Context, args ...string) (*build.TestConfig, error) {
+	cfg := build.NewTestConfig()
+
+	cfg.WorkspaceDir = flags.WorkspaceDir
+	cfg.CacheDir = flags.CacheDir
+	cfg.ApkCacheDir = flags.ApkCacheDir
+	cfg.ExtraKeys = flags.ExtraKeys
+	cfg.ExtraRepos = flags.ExtraRepos
+	cfg.ExtraTestPackages = flags.ExtraTestPackages
+	cfg.EnvFile = flags.EnvFile
+	cfg.Debug = flags.Debug
+	cfg.IgnoreSignatures = flags.IgnoreSignatures
+	cfg.BuildKitAddr = flags.BuildKitAddr
 
 	if len(args) > 0 {
-		options = append(options, build.WithTestBuildKitConfig(args[0]))
+		cfg.ConfigFile = args[0]
 	}
 	if len(args) > 1 {
-		options = append(options, build.WithTestBuildKitPackage(args[1]))
+		cfg.Package = args[1]
 	}
 
 	if flags.SourceDir != "" {
-		options = append(options, build.WithTestBuildKitSourceDir(flags.SourceDir))
+		cfg.SourceDir = flags.SourceDir
 	}
 
-	for i := range flags.PipelineDirs {
-		options = append(options, build.WithTestBuildKitPipelineDir(flags.PipelineDirs[i]))
-	}
-	options = append(options, build.WithTestBuildKitPipelineDir(BuiltinPipelineDir))
+	// Add pipeline directories
+	cfg.PipelineDirs = append(cfg.PipelineDirs, flags.PipelineDirs...)
+	cfg.PipelineDirs = append(cfg.PipelineDirs, BuiltinPipelineDir)
 
-	return options, nil
+	return cfg, nil
 }
 
 func test() *cobra.Command {
@@ -124,12 +123,13 @@ func test() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			archs := apko_types.ParseArchitectures(flags.Archstrs)
-			options, err := flags.TestOptions(ctx, args...)
+
+			cfg, err := flags.ToTestConfig(ctx, args...)
 			if err != nil {
-				return fmt.Errorf("getting test options from flags: %w", err)
+				return fmt.Errorf("creating test config from flags: %w", err)
 			}
 
-			return TestCmd(cmd.Context(), archs, options...)
+			return TestCmdWithConfig(ctx, archs, cfg)
 		},
 	}
 
@@ -139,7 +139,8 @@ func test() *cobra.Command {
 	return cmd
 }
 
-func TestCmd(ctx context.Context, archs []apko_types.Architecture, baseOpts ...build.TestBuildKitOption) error {
+// TestCmdWithConfig executes tests for the given architectures using the provided TestConfig.
+func TestCmdWithConfig(ctx context.Context, archs []apko_types.Architecture, baseCfg *build.TestConfig) error {
 	log := clog.FromContext(ctx)
 	ctx, span := otel.Tracer("melange").Start(ctx, "TestCmd")
 	defer span.End()
@@ -151,10 +152,11 @@ func TestCmd(ctx context.Context, archs []apko_types.Architecture, baseOpts ...b
 	// Set up the test contexts before running them.
 	tcs := []*build.TestBuildKit{}
 	for _, arch := range archs {
-		opts := []build.TestBuildKitOption{build.WithTestBuildKitArch(arch)}
-		opts = append(opts, baseOpts...)
+		// Clone config and set architecture
+		cfg := baseCfg.Clone()
+		cfg.Arch = arch
 
-		tc, err := build.NewTestBuildKit(ctx, opts...)
+		tc, err := build.NewTestBuildKitFromConfig(ctx, cfg)
 		if err != nil {
 			return err
 		}

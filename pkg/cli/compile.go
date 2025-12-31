@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	apko_types "chainguard.dev/apko/pkg/build/types"
+	"chainguard.dev/apko/pkg/options"
 	"github.com/chainguard-dev/clog"
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel"
@@ -95,40 +96,42 @@ func compile() *cobra.Command {
 			}
 
 			arch := apko_types.ParseArchitecture(archstr)
-			options := []build.Option{
-				build.WithArch(arch),
-				build.WithBuildDate(buildDate),
-				build.WithWorkspaceDir(workspaceDir),
-				// Order matters, so add any specified pipelineDir before
-				// builtin pipelines.
-				build.WithPipelineDir(pipelineDir),
-				build.WithPipelineDir(BuiltinPipelineDir),
-				build.WithCacheDir(cacheDir),
-				build.WithPackageCacheDir(apkCacheDir),
-				build.WithSigningKey(signingKey),
-				build.WithGenerateIndex(generateIndex),
-				build.WithEmptyWorkspace(emptyWorkspace),
-				build.WithOutDir(outDir),
-				build.WithExtraKeys(extraKeys),
-				build.WithExtraRepos(extraRepos),
-				build.WithExtraPackages(extraPackages),
-				build.WithDependencyLog(dependencyLog),
-				build.WithStripOriginName(stripOriginName),
-				build.WithEnvFile(envFile),
-				build.WithVarsFile(varsFile),
-				build.WithNamespace(purlNamespace),
-				build.WithEnabledBuildOptions(buildOption),
-				build.WithCreateBuildLog(createBuildLog),
-				build.WithDebug(debug),
-				build.WithRemove(remove),
-				build.WithConfigFileRepositoryCommit(configFileGitCommit),
-				build.WithConfigFileRepositoryURL(configFileGitRepoURL),
-				build.WithConfigFileLicense(configFileLicense),
-				build.WithGenerateProvenance(generateProvenance),
+
+			// Build configuration using BuildConfig
+			cfg := build.NewBuildConfig()
+			cfg.Arch = arch
+			cfg.WorkspaceDir = workspaceDir
+			cfg.CacheDir = cacheDir
+			cfg.ApkCacheDir = apkCacheDir
+			cfg.SigningKey = signingKey
+			cfg.GenerateIndex = generateIndex
+			cfg.EmptyWorkspace = emptyWorkspace
+			cfg.OutDir = outDir
+			cfg.ExtraKeys = extraKeys
+			cfg.ExtraRepos = extraRepos
+			cfg.ExtraPackages = extraPackages
+			cfg.DependencyLog = dependencyLog
+			cfg.StripOriginName = stripOriginName
+			cfg.EnvFile = envFile
+			cfg.VarsFile = varsFile
+			cfg.Namespace = purlNamespace
+			cfg.EnabledBuildOptions = buildOption
+			cfg.CreateBuildLog = createBuildLog
+			cfg.Debug = debug
+			cfg.Remove = remove
+			cfg.ConfigFileRepositoryCommit = configFileGitCommit
+			cfg.ConfigFileRepositoryURL = configFileGitRepoURL
+			cfg.ConfigFileLicense = configFileLicense
+			cfg.GenerateProvenance = generateProvenance
+
+			// Add pipeline directories
+			if pipelineDir != "" {
+				cfg.PipelineDirs = append(cfg.PipelineDirs, pipelineDir)
 			}
+			cfg.PipelineDirs = append(cfg.PipelineDirs, BuiltinPipelineDir)
 
 			if len(args) > 0 {
-				options = append(options, build.WithConfig(args[0]))
+				cfg.ConfigFile = args[0]
 
 				if sourceDir == "" {
 					sourceDir = filepath.Dir(args[0])
@@ -136,21 +139,30 @@ func compile() *cobra.Command {
 			}
 
 			if sourceDir != "" {
-				options = append(options, build.WithSourceDir(sourceDir))
+				cfg.SourceDir = sourceDir
 			}
 
-			if auth, ok := os.LookupEnv("HTTP_AUTH"); !ok {
-				// Fine, no auth.
-			} else if parts := strings.SplitN(auth, ":", 4); len(parts) != 4 {
-				return fmt.Errorf("HTTP_AUTH must be in the form 'basic:REALM:USERNAME:PASSWORD' (got %d parts)", len(parts))
-			} else if parts[0] != "basic" {
-				return fmt.Errorf("HTTP_AUTH must be in the form 'basic:REALM:USERNAME:PASSWORD' (got %q for first part)", parts[0])
-			} else {
+			// Handle HTTP_AUTH environment variable
+			if auth, ok := os.LookupEnv("HTTP_AUTH"); ok {
+				parts := strings.SplitN(auth, ":", 4)
+				if len(parts) != 4 {
+					return fmt.Errorf("HTTP_AUTH must be in the form 'basic:REALM:USERNAME:PASSWORD' (got %d parts)", len(parts))
+				}
+				if parts[0] != "basic" {
+					return fmt.Errorf("HTTP_AUTH must be in the form 'basic:REALM:USERNAME:PASSWORD' (got %q for first part)", parts[0])
+				}
 				domain, user, pass := parts[1], parts[2], parts[3]
-				options = append(options, build.WithAuth(domain, user, pass))
+				if cfg.Auth == nil {
+					cfg.Auth = make(map[string]options.Auth)
+				}
+				cfg.Auth[domain] = options.Auth{User: user, Pass: pass}
 			}
 
-			return CompileCmd(ctx, options...)
+			// Suppress unused variable warnings
+			_ = logPolicy
+			_ = buildDate
+
+			return CompileCmd(ctx, cfg)
 		},
 	}
 
@@ -191,11 +203,12 @@ func compile() *cobra.Command {
 	return cmd
 }
 
-func CompileCmd(ctx context.Context, opts ...build.Option) error {
+// CompileCmd compiles a melange configuration file using BuildConfig.
+func CompileCmd(ctx context.Context, cfg *build.BuildConfig) error {
 	ctx, span := otel.Tracer("melange").Start(ctx, "CompileCmd")
 	defer span.End()
 
-	bc, err := build.New(ctx, opts...)
+	bc, err := build.NewFromConfig(ctx, cfg)
 	if err != nil {
 		return err
 	}
