@@ -147,6 +147,78 @@ type Build struct {
 	LogWriter io.Writer
 }
 
+// NewFromConfig creates a new Build from a BuildConfig.
+// This is the preferred way to create builds as it uses the unified configuration struct.
+func NewFromConfig(ctx context.Context, cfg *BuildConfig) (*Build, error) {
+	b := Build{
+		ConfigFile:                 cfg.ConfigFile,
+		Configuration:              cfg.Configuration,
+		ConfigFileRepositoryURL:    cfg.ConfigFileRepositoryURL,
+		ConfigFileRepositoryCommit: cfg.ConfigFileRepositoryCommit,
+		ConfigFileLicense:          cfg.ConfigFileLicense,
+		SourceDateEpoch:            cfg.SourceDateEpoch,
+		WorkspaceDir:               cfg.WorkspaceDir,
+		WorkspaceIgnore:            cfg.WorkspaceIgnore,
+		PipelineDirs:               cfg.PipelineDirs,
+		SourceDir:                  cfg.SourceDir,
+		SigningKey:                 cfg.SigningKey,
+		SigningPassphrase:          cfg.SigningPassphrase,
+		Namespace:                  cfg.Namespace,
+		GenerateIndex:              cfg.GenerateIndex,
+		EmptyWorkspace:             cfg.EmptyWorkspace,
+		OutDir:                     cfg.OutDir,
+		Arch:                       cfg.Arch,
+		Libc:                       cfg.Libc,
+		ExtraKeys:                  cfg.ExtraKeys,
+		ExtraRepos:                 cfg.ExtraRepos,
+		ExtraPackages:              cfg.ExtraPackages,
+		DependencyLog:              cfg.DependencyLog,
+		CreateBuildLog:             cfg.CreateBuildLog,
+		PersistLintResults:         cfg.PersistLintResults,
+		CacheDir:                   cfg.CacheDir,
+		ApkCacheDir:                cfg.ApkCacheDir,
+		StripOriginName:            cfg.StripOriginName,
+		EnvFile:                    cfg.EnvFile,
+		VarsFile:                   cfg.VarsFile,
+		BuildKitAddr:               cfg.BuildKitAddr,
+		Debug:                      cfg.Debug,
+		Remove:                     cfg.Remove,
+		CacheRegistry:              cfg.CacheRegistry,
+		CacheMode:                  cfg.CacheMode,
+		ApkoRegistry:               cfg.ApkoRegistry,
+		ApkoRegistryInsecure:       cfg.ApkoRegistryInsecure,
+		LintRequire:                cfg.LintRequire,
+		LintWarn:                   cfg.LintWarn,
+		Auth:                       cfg.Auth,
+		IgnoreSignatures:           cfg.IgnoreSignatures,
+		EnabledBuildOptions:        cfg.EnabledBuildOptions,
+		MaxLayers:                  cfg.MaxLayers,
+		ExportOnFailure:            cfg.ExportOnFailure,
+		ExportRef:                  cfg.ExportRef,
+		GenerateProvenance:         cfg.GenerateProvenance,
+		Start:                      time.Now(),
+		SBOMGenerator:              &spdx.Generator{},
+	}
+
+	// Apply defaults
+	if b.WorkspaceIgnore == "" {
+		b.WorkspaceIgnore = ".melangeignore"
+	}
+	if b.OutDir == "" {
+		b.OutDir = "."
+	}
+	if b.CacheDir == "" {
+		b.CacheDir = "./melange-cache/"
+	}
+	if b.Arch == "" {
+		b.Arch = apko_types.ParseArchitecture(runtime.GOARCH)
+	}
+
+	return b.initialize(ctx)
+}
+
+// New creates a new Build from a set of Options.
+// Deprecated: Use NewFromConfig with a BuildConfig for new code.
 func New(ctx context.Context, opts ...Option) (*Build, error) {
 	b := Build{
 		WorkspaceIgnore: ".melangeignore",
@@ -163,6 +235,12 @@ func New(ctx context.Context, opts ...Option) (*Build, error) {
 			return nil, err
 		}
 	}
+
+	return b.initialize(ctx)
+}
+
+// initialize performs common initialization for both New and NewFromConfig.
+func (b *Build) initialize(ctx context.Context) (*Build, error) {
 
 	log := clog.FromContext(ctx).With("arch", b.Arch.ToAPK())
 	ctx = clog.WithLogger(ctx, log)
@@ -253,7 +331,7 @@ func New(ctx context.Context, opts ...Option) (*Build, error) {
 		}
 	}
 
-	return &b, nil
+	return b, nil
 }
 
 func (b *Build) Close(ctx context.Context) error {
