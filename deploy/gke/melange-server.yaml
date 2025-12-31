@@ -28,6 +28,9 @@ spec:
         app: melange-server
     spec:
       serviceAccountName: melange-server
+      # Schedule on buildkit-pool nodes which have 60Gi RAM (default-pool only has 13Gi)
+      nodeSelector:
+        cloud.google.com/gke-nodepool: buildkit-pool
       containers:
       - name: melange-server
         # ko:// reference - ko apply will build and push this image
@@ -37,8 +40,8 @@ spec:
         - --backends-config=/etc/melange/backends.yaml
         - --gcs-bucket=$(GCS_BUCKET)
         - --enable-tracing
-        # max-parallel=0 means use pool capacity (8 backends × 16 jobs = 128)
-        - --max-parallel=0
+        # max-parallel=32 means 2 jobs per BuildKit worker (16 workers × 2 = 32)
+        - --max-parallel=32
         env:
         - name: GCS_BUCKET
           valueFrom:
@@ -81,10 +84,10 @@ spec:
           name: http
         resources:
           requests:
-            memory: "4Gi"
+            memory: "8Gi"
             cpu: "1000m"
           limits:
-            memory: "16Gi"
+            memory: "32Gi"
             cpu: "4000m"
         livenessProbe:
           httpGet:
