@@ -497,11 +497,6 @@ func (b *Build) populateWorkspace(ctx context.Context, src fs.FS) error {
 	})
 }
 
-type linterTarget struct {
-	pkgName  string
-	disabled []string // checks that are downgraded from required -> warn
-}
-
 func (b *Build) BuildPackage(ctx context.Context) error {
 	ctx, span := otel.Tracer("melange").Start(ctx, "BuildPackage")
 	defer span.End()

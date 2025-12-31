@@ -38,9 +38,7 @@ import (
 	"github.com/dlorenc/melange2/pkg/build/sbom"
 	"github.com/dlorenc/melange2/pkg/buildkit"
 	"github.com/dlorenc/melange2/pkg/config"
-	"github.com/dlorenc/melange2/pkg/index"
-	"github.com/dlorenc/melange2/pkg/license"
-	"github.com/dlorenc/melange2/pkg/linter"
+	"github.com/dlorenc/melange2/pkg/output"
 )
 
 // buildPackageBuildKit implements package building using BuildKit.
@@ -70,8 +68,6 @@ func (b *Build) buildPackageBuildKit(ctx context.Context) error {
 		defer cancel()
 		ctx = tctx
 	}
-
-	pkg := &b.Configuration.Package
 
 	log.Debugf("evaluating pipelines for package requirements")
 	if err := b.Compile(ctx); err != nil {
@@ -197,131 +193,60 @@ func (b *Build) buildPackageBuildKit(ctx context.Context) error {
 	log.Infof("loading workspace from: %s", b.WorkspaceDir)
 	b.WorkspaceDirFS = apkofs.DirFS(ctx, b.WorkspaceDir)
 
-	// Perform package linting
-	linterQueue := []linterTarget{
-		{
-			pkgName:  b.Configuration.Package.Name,
-			disabled: b.Configuration.Package.Checks.Disabled,
-		},
-	}
-	for _, sp := range b.Configuration.Subpackages {
-		linterQueue = append(linterQueue, linterTarget{
-			pkgName:  sp.Name,
-			disabled: sp.Checks.Disabled,
-		})
-	}
-
-	for _, lt := range linterQueue {
-		log.Infof("running package linters for %s", lt.pkgName)
-
-		fsys, err := apkofs.Sub(b.WorkspaceDirFS, filepath.Join(melangeOutputDirName, lt.pkgName))
-		if err != nil {
-			return fmt.Errorf("failed to return filesystem for workspace subtree: %w", err)
-		}
-
-		require := slices.DeleteFunc(b.LintRequire, func(s string) bool {
-			return slices.Contains(lt.disabled, s)
-		})
-		warn := slices.CompactFunc(append(b.LintWarn, lt.disabled...), func(a, b string) bool {
-			return a == b
-		})
-
-		outDir := ""
-		if b.PersistLintResults {
-			outDir = b.OutDir
-		}
-
-		if err := linter.LintBuild(ctx, b.Configuration, lt.pkgName, require, warn, fsys, outDir, b.Arch.ToAPK()); err != nil {
-			return fmt.Errorf("unable to lint package %s: %w", lt.pkgName, err)
-		}
-	}
-
-	// Perform license checks
-	if _, _, err := license.LicenseCheck(ctx, b.Configuration, b.WorkspaceDirFS); err != nil {
-		return fmt.Errorf("license check: %w", err)
-	}
-
 	// Get build config PURL for SBOM generation
 	buildConfigPURL, err := b.getBuildConfigPURL()
 	if err != nil {
 		return fmt.Errorf("getting PURL for build config: %w", err)
 	}
 
-	// Create a filesystem rooted at the melange-out directory for SBOM generation
-	outfs, err := apkofs.Sub(b.WorkspaceDirFS, melangeOutputDirName)
-	if err != nil {
-		return fmt.Errorf("creating SBOM filesystem: %w", err)
+	// Run post-build processing using the output processor
+	processor := &output.Processor{
+		Options: output.ProcessOptions{
+			SkipIndex: !b.GenerateIndex,
+		},
+		Lint: output.LintConfig{
+			Require:        b.LintRequire,
+			Warn:           b.LintWarn,
+			PersistResults: b.PersistLintResults,
+			OutDir:         b.OutDir,
+		},
+		SBOM: output.SBOMConfig{
+			Generator: b.SBOMGenerator,
+			Namespace: namespace,
+			ConfigFile: &sbom.ConfigFile{
+				Path:          b.ConfigFile,
+				RepositoryURL: b.ConfigFileRepositoryURL,
+				Commit:        b.ConfigFileRepositoryCommit,
+				License:       b.ConfigFileLicense,
+				PURL:          buildConfigPURL,
+			},
+			ReleaseData: releaseData,
+		},
+		Emit: output.EmitConfig{
+			Emitter: b.Emit,
+		},
+		Index: output.IndexConfig{
+			SigningKey: b.SigningKey,
+		},
 	}
 
-	// Generate SBOMs
-	genCtx := &sbom.GeneratorContext{
+	processInput := &output.ProcessInput{
 		Configuration:   b.Configuration,
 		WorkspaceDir:    b.WorkspaceDir,
-		OutputFS:        outfs,
-		SourceDateEpoch: b.SourceDateEpoch,
-		Namespace:       namespace,
+		WorkspaceDirFS:  b.WorkspaceDirFS,
+		OutDir:          b.OutDir,
 		Arch:            b.Arch.ToAPK(),
-		ConfigFile: &sbom.ConfigFile{
-			Path:          b.ConfigFile,
-			RepositoryURL: b.ConfigFileRepositoryURL,
-			Commit:        b.ConfigFileRepositoryCommit,
-			License:       b.ConfigFileLicense,
-			PURL:          buildConfigPURL,
-		},
-		ReleaseData: releaseData,
+		SourceDateEpoch: b.SourceDateEpoch,
 	}
 
-	if err := b.SBOMGenerator.GenerateSBOM(ctx, genCtx); err != nil {
-		return fmt.Errorf("generating SBOMs: %w", err)
-	}
-
-	// Emit main package
-	if err := b.Emit(ctx, pkg); err != nil {
-		return fmt.Errorf("unable to emit package: %w", err)
-	}
-
-	// Emit subpackages
-	for _, sp := range b.Configuration.Subpackages {
-		if err := b.Emit(ctx, pkgFromSub(&sp)); err != nil {
-			return fmt.Errorf("unable to emit package: %w", err)
-		}
+	if err := processor.Process(ctx, processInput); err != nil {
+		return err
 	}
 
 	// Clean up workspace
 	log.Debugf("cleaning workspace")
 	if err := os.RemoveAll(b.WorkspaceDir); err != nil {
 		log.Warnf("unable to clean workspace: %s", err)
-	}
-
-	// Generate APKINDEX if requested
-	if b.GenerateIndex {
-		packageDir := filepath.Join(b.OutDir, b.Arch.ToAPK())
-		log.Infof("generating apk index from packages in %s", packageDir)
-
-		var apkFiles []string
-		pkgFileName := fmt.Sprintf("%s-%s-r%d.apk", b.Configuration.Package.Name, b.Configuration.Package.Version, b.Configuration.Package.Epoch)
-		apkFiles = append(apkFiles, filepath.Join(packageDir, pkgFileName))
-
-		for _, subpkg := range b.Configuration.Subpackages {
-			subpkgFileName := fmt.Sprintf("%s-%s-r%d.apk", subpkg.Name, b.Configuration.Package.Version, b.Configuration.Package.Epoch)
-			apkFiles = append(apkFiles, filepath.Join(packageDir, subpkgFileName))
-		}
-
-		opts := []index.Option{
-			index.WithPackageFiles(apkFiles),
-			index.WithSigningKey(b.SigningKey),
-			index.WithMergeIndexFileFlag(true),
-			index.WithIndexFile(filepath.Join(packageDir, "APKINDEX.tar.gz")),
-		}
-
-		idx, err := index.New(opts...)
-		if err != nil {
-			return fmt.Errorf("unable to create index: %w", err)
-		}
-
-		if err := idx.GenerateIndex(ctx); err != nil {
-			return fmt.Errorf("unable to generate index: %w", err)
-		}
 	}
 
 	return nil
