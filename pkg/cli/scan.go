@@ -282,6 +282,9 @@ func scanCmd(ctx context.Context, file string, sc *scanConfig) error {
 				continue
 			}
 			info := infos[subpkg.Name]
+			if info == nil {
+				continue
+			}
 
 			hdl := &scaImpl{
 				pb:   &pb,
@@ -719,6 +722,10 @@ func tgs(x, y []string) []pair {
 	// We add sentinel pairs {0,0}, and {len(x),len(y)}
 	// to the returned sequence, to help the processing loop.
 	J := inv
+	if J == nil || xi == nil || yi == nil {
+		// No unique matching strings found; return just the sentinels
+		return []pair{{0, 0}, {len(x), len(y)}}
+	}
 	n := len(xi)
 	T := make([]int, n)
 	L := make([]int, n)
