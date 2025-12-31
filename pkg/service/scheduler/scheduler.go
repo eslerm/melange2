@@ -465,53 +465,28 @@ func (s *Scheduler) executePackageJob(ctx context.Context, jobID string, pkg *ty
 		return fmt.Errorf("creating cache dir: %w", err)
 	}
 
-	// Set up build options
-	opts := []build.Option{
-		build.WithConfig(configPath),
-		build.WithArch(targetArch),
-		build.WithOutDir(outputDir),
-		build.WithCacheDir(cacheDir),
-		build.WithBuildKitAddr(backend.Addr),
-		build.WithDebug(spec.Debug),
-		build.WithGenerateIndex(true),
-		build.WithExtraRepos([]string{"https://packages.wolfi.dev/os"}),
-		build.WithExtraKeys([]string{"https://packages.wolfi.dev/os/wolfi-signing.rsa.pub"}),
-		build.WithIgnoreSignatures(true),
-		build.WithConfigFileRepositoryURL("https://melange-service/inline"),
-		build.WithConfigFileRepositoryCommit("inline-" + jobID),
-		build.WithConfigFileLicense("Apache-2.0"),
-		build.WithNamespace("wolfi"),
-	}
-
-	// Add cache config if registry is configured
-	if s.config.CacheRegistry != "" {
-		opts = append(opts, build.WithCacheRegistry(s.config.CacheRegistry))
-		if s.config.CacheMode != "" {
-			opts = append(opts, build.WithCacheMode(s.config.CacheMode))
-		}
-	}
-
-	// Add apko registry config if configured
-	// This enables caching apko base images for faster subsequent builds
-	if s.config.ApkoRegistry != "" {
-		opts = append(opts, build.WithApkoRegistry(s.config.ApkoRegistry))
-		opts = append(opts, build.WithApkoRegistryInsecure(s.config.ApkoRegistryInsecure))
-	}
-
-	if len(pipelines) > 0 {
-		opts = append(opts, build.WithPipelineDir(pipelineDir))
-	}
-
-	// Add source directory if source files were provided
-	if len(sourceFiles) > 0 {
-		opts = append(opts, build.WithSourceDir(sourceDir))
-	}
+	// Build configuration using the unified BuildConfig
+	buildCfg := build.NewBuildConfigForRemote(build.RemoteBuildParams{
+		ConfigPath:           configPath,
+		PipelineDir:          func() string { if len(pipelines) > 0 { return pipelineDir }; return "" }(),
+		SourceDir:            func() string { if len(sourceFiles) > 0 { return sourceDir }; return "" }(),
+		OutputDir:            outputDir,
+		CacheDir:             cacheDir,
+		BackendAddr:          backend.Addr,
+		Debug:                spec.Debug,
+		JobID:                jobID,
+		CacheRegistry:        s.config.CacheRegistry,
+		CacheMode:            s.config.CacheMode,
+		ApkoRegistry:         s.config.ApkoRegistry,
+		ApkoRegistryInsecure: s.config.ApkoRegistryInsecure,
+	})
+	buildCfg.Arch = targetArch
 
 	// Phase 3: Build initialization
 	initTimer := tracing.NewTimer(ctx, "phase_build_init")
 
-	// Create the build context
-	bc, err := build.New(ctx, opts...)
+	// Create the build context directly from BuildConfig
+	bc, err := build.NewFromConfig(ctx, buildCfg)
 	if err != nil {
 		return fmt.Errorf("initializing build: %w", err)
 	}

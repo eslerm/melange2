@@ -63,25 +63,26 @@ func ParseRebuildFlags(args []string) (*RebuildFlags, []string, error) {
 	return flags, fs.Args(), nil
 }
 
-// RebuildOptions converts RebuildFlags into a slice of build.Option
-// This includes all options needed for rebuilding a package from its embedded metadata.
-func (flags *RebuildFlags) RebuildOptions(ctx context.Context, pkginfo *goapk.PackageInfo, cfg *config.Configuration, cfgpkg *spdx.Package, cfgpurl purl.PackageURL) ([]build.Option, error) {
-	opts := []build.Option{
-		build.WithConfigFileRepositoryURL(fmt.Sprintf("https://github.com/%s/%s", cfgpurl.Namespace, cfgpurl.Name)),
-		build.WithNamespace(strings.ToLower(strings.TrimPrefix(cfgpkg.Originator, "Organization: "))),
-		build.WithConfigFileRepositoryCommit(cfgpkg.Version),
-		build.WithConfigFileLicense(cfgpkg.LicenseDeclared),
-		build.WithBuildDate(time.Unix(pkginfo.BuildDate, 0).UTC().Format(time.RFC3339)),
-		build.WithBuildKitAddr(flags.BuildKitAddr),
-		build.WithOutDir(flags.OutDir),
-		build.WithConfiguration(cfg, cfgpurl.Subpath),
-		build.WithSigningKey(flags.SigningKey),
-	}
+// ToBuildConfig converts RebuildFlags into a BuildConfig for rebuilding packages.
+func (flags *RebuildFlags) ToBuildConfig(ctx context.Context, pkginfo *goapk.PackageInfo, cfg *config.Configuration, cfgpkg *spdx.Package, cfgpurl purl.PackageURL) (*build.BuildConfig, error) {
+	buildCfg := build.NewBuildConfig()
+
+	buildCfg.ConfigFile = cfgpurl.Subpath
+	buildCfg.Configuration = cfg
+	buildCfg.ConfigFileRepositoryURL = fmt.Sprintf("https://github.com/%s/%s", cfgpurl.Namespace, cfgpurl.Name)
+	buildCfg.Namespace = strings.ToLower(strings.TrimPrefix(cfgpkg.Originator, "Organization: "))
+	buildCfg.ConfigFileRepositoryCommit = cfgpkg.Version
+	buildCfg.ConfigFileLicense = cfgpkg.LicenseDeclared
+	buildCfg.SourceDateEpoch = time.Unix(pkginfo.BuildDate, 0).UTC()
+	buildCfg.BuildKitAddr = flags.BuildKitAddr
+	buildCfg.OutDir = flags.OutDir
+	buildCfg.SigningKey = flags.SigningKey
+
 	if flags.SourceDir != "" {
-		opts = append(opts, build.WithSourceDir(flags.SourceDir))
+		buildCfg.SourceDir = flags.SourceDir
 	}
 
-	return opts, nil
+	return buildCfg, nil
 }
 
 // RebuildCmd is the implementation of the rebuild command.
@@ -106,14 +107,14 @@ func RebuildCmd(ctx context.Context, flags *RebuildFlags, args []string) error {
 			clog.Warnf("not rebuilding %q because was already rebuilt", a)
 		} else {
 			clog.Infof("rebuilding %q", a)
-			opts, err := flags.RebuildOptions(ctx, pkginfo, cfg, cfgpkg, cfgpurl)
+			buildCfg, err := flags.ToBuildConfig(ctx, pkginfo, cfg, cfgpkg, cfgpurl)
 			if err != nil {
-				return fmt.Errorf("getting rebuild options from flags: %w", err)
+				return fmt.Errorf("creating build config from flags: %w", err)
 			}
 
-			if err := BuildCmd(ctx,
+			if err := BuildCmdWithConfig(ctx,
 				[]apko_types.Architecture{apko_types.ParseArchitecture(pkginfo.Arch)},
-				opts...); err != nil {
+				buildCfg); err != nil {
 				return fmt.Errorf("failed to rebuild %q: %w", a, err)
 			}
 

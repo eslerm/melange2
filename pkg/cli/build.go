@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	apko_types "chainguard.dev/apko/pkg/build/types"
+	"chainguard.dev/apko/pkg/options"
 	"github.com/chainguard-dev/clog"
 	"github.com/go-git/go-git/v5"
 	"github.com/spf13/cobra"
@@ -144,35 +145,45 @@ func ParseBuildFlags(args []string) (*BuildFlags, []string, error) {
 	return flags, fs.Args(), nil
 }
 
-// BuildOptions converts BuildFlags into a slice of build.Option
-// This includes all core build options that are directly derived from the flags.
-func (flags *BuildFlags) BuildOptions(ctx context.Context, args ...string) ([]build.Option, error) {
+// ToBuildConfig converts BuildFlags into a BuildConfig struct.
+// This is the preferred way to create build configuration from CLI flags.
+func (flags *BuildFlags) ToBuildConfig(ctx context.Context, args ...string) (*build.BuildConfig, error) {
 	log := clog.FromContext(ctx)
 
-	// Favor explicit, user-provided information for the git provenance of the
-	// melange build definition. As a fallback, detect this from local git state.
-	// Git auto-detection should be "best effort" and not fail the build if it
-	// fails.
+	cfg := build.NewBuildConfig()
+
+	// Favor explicit, user-provided information for the git provenance
 	var buildConfigFilePath string
 	if len(args) > 0 {
-		buildConfigFilePath = args[0] // e.g. "crane.yaml"
+		buildConfigFilePath = args[0]
+		cfg.ConfigFile = buildConfigFilePath
 	}
+
+	// Git commit detection
 	if flags.ConfigFileGitCommit == "" {
 		log.Debugf("git commit for build config not provided, attempting to detect automatically")
 		commit, err := detectGitHead(ctx, buildConfigFilePath)
 		if err != nil {
 			log.Warnf("unable to detect commit for build config file: %v", err)
-			flags.ConfigFileGitCommit = "unknown"
+			cfg.ConfigFileRepositoryCommit = "unknown"
 		} else {
-			flags.ConfigFileGitCommit = commit
+			cfg.ConfigFileRepositoryCommit = commit
 		}
-	}
-	if flags.ConfigFileGitRepoURL == "" {
-		log.Warnf("git repository URL for build config not provided")
-		flags.ConfigFileGitRepoURL = "https://unknown/unknown/unknown"
+	} else {
+		cfg.ConfigFileRepositoryCommit = flags.ConfigFileGitCommit
 	}
 
-	// Convention: auto-detect pipeline directory from ./pipelines/ if not specified
+	// Git repo URL
+	if flags.ConfigFileGitRepoURL == "" {
+		log.Warnf("git repository URL for build config not provided")
+		cfg.ConfigFileRepositoryURL = "https://unknown/unknown/unknown"
+	} else {
+		cfg.ConfigFileRepositoryURL = flags.ConfigFileGitRepoURL
+	}
+
+	cfg.ConfigFileLicense = flags.ConfigFileLicense
+
+	// Convention: auto-detect pipeline directory
 	pipelineDir := flags.PipelineDir
 	if pipelineDir == "" {
 		if detected := detectConventionalPipelineDir(); detected != "" {
@@ -180,8 +191,12 @@ func (flags *BuildFlags) BuildOptions(ctx context.Context, args ...string) ([]bu
 			pipelineDir = detected
 		}
 	}
+	if pipelineDir != "" {
+		cfg.PipelineDirs = append(cfg.PipelineDirs, pipelineDir)
+	}
+	cfg.PipelineDirs = append(cfg.PipelineDirs, BuiltinPipelineDir)
 
-	// Convention: auto-detect signing key if not specified
+	// Convention: auto-detect signing key
 	signingKey := flags.SigningKey
 	if signingKey == "" {
 		if detected := detectConventionalSigningKey(); detected != "" {
@@ -189,76 +204,67 @@ func (flags *BuildFlags) BuildOptions(ctx context.Context, args ...string) ([]bu
 			signingKey = detected
 		}
 	}
+	cfg.SigningKey = signingKey
 
-	opts := []build.Option{
-		build.WithBuildDate(flags.BuildDate),
-		build.WithWorkspaceDir(flags.WorkspaceDir),
-		// Order matters, so add any specified pipelineDir before
-		// builtin pipelines.
-		build.WithPipelineDir(pipelineDir),
-		build.WithPipelineDir(BuiltinPipelineDir),
-		build.WithCacheDir(flags.CacheDir),
-		build.WithPackageCacheDir(flags.ApkCacheDir),
-		build.WithSigningKey(signingKey),
-		build.WithGenerateIndex(flags.GenerateIndex),
-		build.WithEmptyWorkspace(flags.EmptyWorkspace),
-		build.WithOutDir(flags.OutDir),
-		build.WithExtraKeys(flags.ExtraKeys),
-		build.WithExtraRepos(flags.ExtraRepos),
-		build.WithExtraPackages(flags.ExtraPackages),
-		build.WithDependencyLog(flags.DependencyLog),
-		build.WithStripOriginName(flags.StripOriginName),
-		build.WithEnvFile(flags.EnvFile),
-		build.WithVarsFile(flags.VarsFile),
-		build.WithNamespace(flags.PurlNamespace),
-		build.WithEnabledBuildOptions(flags.BuildOption),
-		build.WithCreateBuildLog(flags.CreateBuildLog),
-		build.WithPersistLintResults(flags.PersistLintResults),
-		build.WithDebug(flags.Debug),
-		build.WithRemove(flags.Remove),
-		build.WithLintRequire(flags.LintRequire),
-		build.WithLintWarn(flags.LintWarn),
-		build.WithLibcFlavorOverride(flags.Libc),
-		build.WithIgnoreSignatures(flags.IgnoreSignatures),
-		build.WithConfigFileRepositoryCommit(flags.ConfigFileGitCommit),
-		build.WithConfigFileRepositoryURL(flags.ConfigFileGitRepoURL),
-		build.WithConfigFileLicense(flags.ConfigFileLicense),
-		build.WithGenerateProvenance(flags.GenerateProvenance),
-		build.WithBuildKitAddr(flags.BuildKitAddr),
-		build.WithMaxLayers(flags.MaxLayers),
-		build.WithExportOnFailure(flags.ExportOnFailure, flags.ExportRef),
-		build.WithApkoRegistry(flags.ApkoRegistry),
-		build.WithApkoRegistryInsecure(flags.ApkoRegistryInsecure),
-	}
-
-	if len(args) > 0 {
-		opts = append(opts, build.WithConfig(buildConfigFilePath))
-	}
-
-	// Convention: auto-detect source directory from $pkgname/ if not specified
-	// If SourceDir is explicitly set, use that. Otherwise, try to detect from package name.
+	// Convention: auto-detect source directory
 	if flags.SourceDir != "" {
-		opts = append(opts, build.WithSourceDir(flags.SourceDir))
+		cfg.SourceDir = flags.SourceDir
 	} else if len(args) > 0 {
-		// Try to detect conventional source directory based on package name
 		if detected := detectConventionalSourceDir(buildConfigFilePath); detected != "" {
 			log.Infof("using conventional source directory: %s", detected)
-			opts = append(opts, build.WithSourceDir(detected))
+			cfg.SourceDir = detected
 		}
 	}
 
-	if auth, ok := os.LookupEnv("HTTP_AUTH"); !ok {
-		// Fine, no auth.
-	} else if parts := strings.SplitN(auth, ":", 4); len(parts) != 4 {
-		return nil, fmt.Errorf("HTTP_AUTH must be in the form 'basic:REALM:USERNAME:PASSWORD' (got %d parts)", len(parts))
-	} else if parts[0] != "basic" {
-		return nil, fmt.Errorf("HTTP_AUTH must be in the form 'basic:REALM:USERNAME:PASSWORD' (got %q for first part)", parts[0])
-	} else {
+	// Simple field mappings
+	cfg.WorkspaceDir = flags.WorkspaceDir
+	cfg.CacheDir = flags.CacheDir
+	cfg.ApkCacheDir = flags.ApkCacheDir
+	cfg.GenerateIndex = flags.GenerateIndex
+	cfg.EmptyWorkspace = flags.EmptyWorkspace
+	cfg.OutDir = flags.OutDir
+	cfg.ExtraKeys = flags.ExtraKeys
+	cfg.ExtraRepos = flags.ExtraRepos
+	cfg.ExtraPackages = flags.ExtraPackages
+	cfg.DependencyLog = flags.DependencyLog
+	cfg.StripOriginName = flags.StripOriginName
+	cfg.EnvFile = flags.EnvFile
+	cfg.VarsFile = flags.VarsFile
+	cfg.Namespace = flags.PurlNamespace
+	cfg.EnabledBuildOptions = flags.BuildOption
+	cfg.CreateBuildLog = flags.CreateBuildLog
+	cfg.PersistLintResults = flags.PersistLintResults
+	cfg.Debug = flags.Debug
+	cfg.Remove = flags.Remove
+	cfg.LintRequire = flags.LintRequire
+	cfg.LintWarn = flags.LintWarn
+	cfg.Libc = flags.Libc
+	cfg.IgnoreSignatures = flags.IgnoreSignatures
+	cfg.GenerateProvenance = flags.GenerateProvenance
+	cfg.BuildKitAddr = flags.BuildKitAddr
+	cfg.MaxLayers = flags.MaxLayers
+	cfg.ExportOnFailure = flags.ExportOnFailure
+	cfg.ExportRef = flags.ExportRef
+	cfg.ApkoRegistry = flags.ApkoRegistry
+	cfg.ApkoRegistryInsecure = flags.ApkoRegistryInsecure
+
+	// Handle HTTP_AUTH environment variable
+	if auth, ok := os.LookupEnv("HTTP_AUTH"); ok {
+		parts := strings.SplitN(auth, ":", 4)
+		if len(parts) != 4 {
+			return nil, fmt.Errorf("HTTP_AUTH must be in the form 'basic:REALM:USERNAME:PASSWORD' (got %d parts)", len(parts))
+		}
+		if parts[0] != "basic" {
+			return nil, fmt.Errorf("HTTP_AUTH must be in the form 'basic:REALM:USERNAME:PASSWORD' (got %q for first part)", parts[0])
+		}
 		domain, user, pass := parts[1], parts[2], parts[3]
-		opts = append(opts, build.WithAuth(domain, user, pass))
+		if cfg.Auth == nil {
+			cfg.Auth = make(map[string]options.Auth)
+		}
+		cfg.Auth[domain] = options.Auth{User: user, Pass: pass}
 	}
 
-	return opts, nil
+	return cfg, nil
 }
 
 // detectConventionalPipelineDir checks if the conventional ./pipelines/ directory exists.
@@ -392,12 +398,13 @@ func buildCmd() *cobra.Command {
 
 			archs := apko_types.ParseArchitectures(flags.Archstrs)
 			log.Infof("melange version %s with buildkit@%s building %s at commit %s for arches %s", cmd.Version, flags.BuildKitAddr, args, flags.ConfigFileGitCommit, archs)
-			options, err := flags.BuildOptions(ctx, args...)
+
+			cfg, err := flags.ToBuildConfig(ctx, args...)
 			if err != nil {
-				return fmt.Errorf("getting build options from flags: %w", err)
+				return fmt.Errorf("creating build config from flags: %w", err)
 			}
 
-			return BuildCmd(ctx, archs, options...)
+			return BuildCmdWithConfig(ctx, archs, cfg)
 		},
 	}
 
@@ -425,7 +432,9 @@ func detectGitHead(ctx context.Context, buildConfigFilePath string) (string, err
 	return commit, nil
 }
 
-func BuildCmd(ctx context.Context, archs []apko_types.Architecture, baseOpts ...build.Option) error {
+// BuildCmdWithConfig executes builds for the given architectures using the provided BuildConfig.
+// This is the preferred entry point for programmatic builds.
+func BuildCmdWithConfig(ctx context.Context, archs []apko_types.Architecture, baseCfg *build.BuildConfig) error {
 	log := clog.FromContext(ctx)
 	ctx, span := otel.Tracer("melange").Start(ctx, "BuildCmd")
 	defer span.End()
@@ -442,10 +451,11 @@ func BuildCmd(ctx context.Context, archs []apko_types.Architecture, baseOpts ...
 	// https://github.com/distroless/nginx/runs/7219233843?check_suite_focus=true
 	bcs := []*build.Build{}
 	for _, arch := range archs {
-		opts := append([]build.Option{}, baseOpts...)
-		opts = append(opts, build.WithArch(arch))
+		// Clone config and set architecture
+		cfg := baseCfg.Clone()
+		cfg.Arch = arch
 
-		bc, err := build.New(ctx, opts...)
+		bc, err := build.NewFromConfig(ctx, cfg)
 		if errors.Is(err, build.ErrSkipThisArch) {
 			log.Warnf("skipping arch %s", arch)
 			continue
