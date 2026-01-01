@@ -320,13 +320,6 @@ func (b *Build) buildGuestLayers(ctx context.Context) ([]v1.Layer, *apko_build.R
 		apko_build.WithIgnoreSignatures(b.IgnoreSignatures),
 	}
 
-	// Enable per-layer caching if registry is configured
-	// apko handles all caching transparently - checking, pulling, and pushing
-	if b.ApkoRegistry != "" {
-		log.Infof("enabling apko layer cache: %s", b.ApkoRegistry)
-		opts = append(opts, apko_build.WithLayerCache(b.ApkoRegistry, b.ApkoRegistryInsecure))
-	}
-
 	// Convert auth config to apko authenticator
 	if len(b.Auth) > 0 {
 		var auths []auth.Authenticator

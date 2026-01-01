@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -29,6 +30,8 @@ import (
 	"syscall"
 	"time"
 
+	apkobuild "chainguard.dev/apko/pkg/build"
+	"chainguard.dev/apko/pkg/apk/expandapk"
 	"github.com/chainguard-dev/clog"
 	"golang.org/x/sync/errgroup"
 
@@ -86,6 +89,10 @@ func run(ctx context.Context) error {
 			log.Errorf("error shutting down tracing: %v", err)
 		}
 	}()
+
+	// Configure apko pools for server mode (bounded memory, optimized for concurrent builds)
+	apkobuild.ConfigurePoolsForService()
+	log.Info("configured apko pools for service mode")
 
 	// Create shared components
 	buildStore := store.NewMemoryBuildStore()
@@ -147,9 +154,10 @@ func run(ctx context.Context) error {
 	// Create a mux that routes /debug/pprof/ to pprof handlers and everything else to API
 	mux := http.NewServeMux()
 	mux.Handle("/debug/pprof/", http.DefaultServeMux) // pprof registers to DefaultServeMux
+	mux.HandleFunc("/debug/apko/stats", handleApkoStats)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Route non-pprof requests to API server
-		if !strings.HasPrefix(r.URL.Path, "/debug/pprof/") {
+		if !strings.HasPrefix(r.URL.Path, "/debug/pprof/") && !strings.HasPrefix(r.URL.Path, "/debug/apko/") {
 			apiServer.ServeHTTP(w, r)
 			return
 		}
@@ -229,6 +237,11 @@ func run(ctx context.Context) error {
 		return sched.Run(ctx)
 	})
 
+	// Run apko cache maintenance (evict stale entries, clear pools, log stats)
+	eg.Go(func() error {
+		return runApkoMaintenance(ctx, log)
+	})
+
 	// Handle shutdown
 	eg.Go(func() error {
 		<-ctx.Done()
@@ -241,4 +254,73 @@ func run(ctx context.Context) error {
 	})
 
 	return eg.Wait()
+}
+
+// runApkoMaintenance runs periodic maintenance on apko caches and pools.
+// This helps prevent unbounded memory growth in long-running server processes.
+func runApkoMaintenance(ctx context.Context, log *clog.Logger) error {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			// Evict old image cache entries (older than 2 hours)
+			evictedImages := apkobuild.DefaultImageCache().Evict(2 * time.Hour)
+
+			// Evict unused tarfs entries (unused for 1 hour)
+			evictedTarFS := expandapk.GlobalTarFSCache().Evict(time.Hour)
+
+			// Clear pools and trigger GC
+			apkobuild.ClearPools()
+
+			// Log stats
+			poolStats := apkobuild.AllPoolStats()
+			imgStats := apkobuild.GetImageCacheStats()
+			compStats := apkobuild.GetCompressionCacheStats()
+			tarfsStats := expandapk.GetTarFSCacheStats()
+
+			log.Infof("apko maintenance: evicted %d images, %d tarfs entries", evictedImages, evictedTarFS)
+			log.Infof("apko image cache: hits=%d misses=%d coalesced=%d size=%d",
+				imgStats.Hits, imgStats.Misses, imgStats.Coalesced, imgStats.Size)
+			log.Infof("apko compression cache: hits=%d misses=%d evictions=%d",
+				compStats.Hits, compStats.Misses, compStats.Evictions)
+			log.Infof("apko tarfs cache: hits=%d misses=%d size=%d",
+				tarfsStats.Hits, tarfsStats.Misses, tarfsStats.Size)
+
+			// Log pool stats summary
+			var totalHits, totalMisses, totalDrops int64
+			for _, s := range poolStats {
+				totalHits += s.Hits
+				totalMisses += s.Misses
+				totalDrops += s.Drops
+			}
+			log.Infof("apko pools: %d pools, total hits=%d misses=%d drops=%d",
+				len(poolStats), totalHits, totalMisses, totalDrops)
+
+			// Reset metrics for fresh monitoring period
+			apkobuild.ResetPoolMetrics()
+			apkobuild.ResetCompressionCacheStats()
+		}
+	}
+}
+
+// handleApkoStats returns apko cache and pool statistics as JSON.
+func handleApkoStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	stats := map[string]any{
+		"pools":             apkobuild.AllPoolStats(),
+		"image_cache":       apkobuild.GetImageCacheStats(),
+		"compression_cache": apkobuild.GetCompressionCacheStats(),
+		"tarfs_cache":       expandapk.GetTarFSCacheStats(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(stats)
 }
