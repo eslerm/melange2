@@ -281,7 +281,7 @@ func (s *Server) handleBuildMetrics(w http.ResponseWriter, r *http.Request, buil
 	}
 
 	// Collect metrics from all packages
-	var packages []PackageMetricsSummary
+	packages := make([]PackageMetricsSummary, 0, len(build.Packages))
 	var totalDurations []int64
 	var buildkitDurations []int64
 	var apkoDurations []int64
