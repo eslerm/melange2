@@ -15,7 +15,6 @@
 package buildkit
 
 import (
-	"errors"
 	"fmt"
 	"path/filepath"
 
@@ -141,20 +140,6 @@ func (b *PipelineBuilder) BuildPipeline(base llb.State, p *config.Pipeline) (llb
 		if !shouldRun {
 			return base, nil
 		}
-	}
-
-	// Check if this is a built-in pipeline with native LLB implementation
-	if IsBuiltinPipeline(p.Uses) {
-		state, err := BuildBuiltinPipeline(base, p)
-		// Check for fallback errors that indicate we should use the shell implementation instead
-		if err != nil && !errors.Is(err, ErrGitCheckoutNoRef) && !errors.Is(err, ErrFetchSHA512NotSupported) {
-			return llb.State{}, err
-		}
-		// If no error, return the native implementation result
-		if err == nil {
-			return state, nil
-		}
-		// Otherwise, fall through to shell implementation (err is a fallback error)
 	}
 
 	state := base
